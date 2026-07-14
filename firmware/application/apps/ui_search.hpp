@@ -39,7 +39,7 @@ namespace ui {
 #define DETECT_DELAY 5  // In 100ms units
 #define RELEASE_DELAY 6
 
-#define AUTO_LISTEN_SECONDS 4          // How long to stay listening to a locked signal
+#define AUTO_LISTEN_SECONDS 4                         // How long to stay listening to a locked signal
 #define AUTO_LISTEN_TICKS (AUTO_LISTEN_SECONDS * 10)  // do_timers() ticks at ~10Hz
 
 struct SearchRecentEntry {
