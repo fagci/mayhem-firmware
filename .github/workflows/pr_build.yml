@@ -15,6 +15,9 @@ jobs:
           fetch-depth: 0
           submodules: true
 
+      - name: Git Submodule Update
+        run: git submodule update --init --recursive
+
       - name: Build the Docker image
         run: docker build -t portapack-dev -f dockerfile-nogit .
 
