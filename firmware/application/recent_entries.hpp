@@ -247,6 +247,12 @@ class RecentEntriesTable : public Widget {
         advance(0);
     }
 
+    /* Currently highlighted entry, or nullptr if the list is empty. */
+    const Entry* selected() const {
+        auto it = find(recent, selected_key);
+        return (it != std::end(recent)) ? &(*it) : nullptr;
+    }
+
    private:
     Entries& recent;
     RecentEntriesColumns& columns;
@@ -352,6 +358,11 @@ class RecentEntriesView : public View {
 
     void set_table(Entries& new_table) {
         _table = new_table;
+    }
+
+    /* Currently highlighted entry, or nullptr if the list is empty. */
+    const Entry* selected() const {
+        return _table.selected();
     }
 
    private:

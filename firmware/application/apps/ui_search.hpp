@@ -39,6 +39,9 @@ namespace ui {
 #define DETECT_DELAY 5  // In 100ms units
 #define RELEASE_DELAY 6
 
+#define AUTO_LISTEN_SECONDS 4                         // How long to stay listening to a locked signal
+#define AUTO_LISTEN_TICKS (AUTO_LISTEN_SECONDS * 10)  // do_timers() ticks at ~10Hz
+
 struct SearchRecentEntry {
     using Key = rf::Frequency;
 
@@ -119,6 +122,7 @@ class SearchView : public View {
         rf::Frequency freq_max = 400'000'000;
         bool snap_search = true;
         uint32_t snap_step = 12'500;
+        bool auto_listen = false;
     };
     SearchSettings settings_{};
     app_settings::SettingsManager app_settings_{
@@ -130,6 +134,7 @@ class SearchView : public View {
             {"freq_max"sv, &settings_.freq_max},
             {"snap_search"sv, &settings_.snap_search},
             {"snap_step"sv, &settings_.snap_step},
+            {"auto_listen"sv, &settings_.auto_listen},
         }};
 
     struct slice_t {
@@ -165,14 +170,28 @@ class SearchView : public View {
     uint16_t locked_bin = 0;
     uint8_t search_counter = 0;
     bool locked = false;
+    bool locked_ignored = false;
     bool logging = false;
     SearchLogger logger{};
+
+    // Auto-listen (temporarily switches baseband to NFM audio on lock).
+    static constexpr const char* ignore_freqman_file = "SEARCH_IGNORE";
+    bool listening = false;
+    uint32_t listen_timer = 0;
+    std::vector<rf::Frequency> ignored_frequencies{};
 
     void do_detection();
     void do_timers();
     void on_channel_spectrum(const ChannelSpectrum& spectrum);
     void on_range_changed();
     void add_spectrum_pixel(Color color);
+
+    void start_listening(rf::Frequency freq);
+    void stop_listening();
+    void finish_listening();
+    bool is_ignored(rf::Frequency freq) const;
+    void load_ignore_list();
+    void add_to_ignore_list(rf::Frequency freq);
 
     RecentEntriesColumns columns{{{"Frequency", 0},
                                   {"Time", 8},
@@ -250,6 +269,16 @@ class SearchView : public View {
          {"500Hz", 500}}};
 
     BigFrequency big_display{{UI_POS_X_CENTER(28), UI_POS_Y(9), UI_POS_WIDTH(28), 52}, 0};
+
+    Checkbox check_listen{
+        {UI_POS_X(1), 27 * 8},
+        11,
+        "Auto-listen",
+        true};
+
+    Button button_ignore{
+        {UI_POS_X_RIGHT(9), 27 * 8, UI_POS_WIDTH(9), 16},
+        "IGNORE"};
 
     MessageHandlerRegistration message_handler_spectrum_config{
         Message::ID::ChannelSpectrumConfig,

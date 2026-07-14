@@ -26,7 +26,10 @@
 #include "binder.hpp"
 #include "string_format.hpp"
 #include "ui_freqman.hpp"
+#include "freqman_db.hpp"
 #include "audio.hpp"
+
+#include <algorithm>
 
 using namespace portapack;
 namespace pmem = portapack::persistent_memory;
@@ -84,12 +87,14 @@ SearchView::SearchView(
                   &check_snap,
                   &options_snap,
                   &big_display,
+                  &check_listen,
+                  &button_ignore,
                   &check_log,
                   &recent_entries_view});
 
     baseband::set_spectrum(SEARCH_SLICE_WIDTH, 31);
 
-    recent_entries_view.set_parent_rect({0, 28 * 8, screen_width, screen_height - 28 * 8});
+    recent_entries_view.set_parent_rect({0, 29 * 8, screen_width, screen_height - 29 * 8});
     recent_entries_view.on_select = [this, &nav](const SearchRecentEntry& entry) {
         nav.push<FrequencySaveView>(entry.frequency);
     };
@@ -121,9 +126,35 @@ SearchView::SearchView(
     bind(field_threshold, settings_.power_threshold);
     bind(check_snap, settings_.snap_search);
     bind(options_snap, settings_.snap_step);
+    bind(check_listen, settings_.auto_listen);
+
+    button_ignore.on_select = [this](Button&) {
+        auto sel = recent_entries_view.selected();
+        if (!sel) return;
+
+        auto freq = sel->frequency;
+        add_to_ignore_list(freq);
+
+        auto it = find(recent, freq);
+        if (it != recent.end())
+            recent.erase(it);
+        recent_entries_view.set_dirty();
+
+        if (locked && resolved_frequency == freq) {
+            if (listening) stop_listening();
+            locked = false;
+            locked_ignored = false;
+            detect_timer = 0;
+            release_timer = 0;
+            listen_timer = 0;
+            text_infos.set("Listening");
+            big_display.set_style(Theme::getInstance()->fg_medium);
+        }
+    };
 
     progress_timers.set_max(DETECT_DELAY);
 
+    load_ignore_list();
     on_range_changed();
     receiver_model.enable();
 
@@ -144,6 +175,8 @@ void SearchView::on_show() {
 }
 
 void SearchView::on_hide() {
+    if (listening)
+        stop_listening();
     baseband::spectrum_streaming_stop();
 }
 
@@ -197,8 +230,15 @@ void SearchView::do_detection() {
                         resolved_frequency = round(resolved_frequency / snap_value) * snap_value;
                     }
 
-                    // Check range
-                    if ((resolved_frequency >= settings_.freq_min) && (resolved_frequency <= settings_.freq_max)) {
+                    locked_ignored = is_ignored(resolved_frequency);
+
+                    if (locked_ignored) {
+                        text_infos.set("Ignored");
+                        big_display.set_style(Theme::getInstance()->fg_medium);
+                        locked = true;
+                        locked_bin = bin_max;
+                    } else if ((resolved_frequency >= settings_.freq_min) && (resolved_frequency <= settings_.freq_max)) {
+                        // Check range
                         duration = 0;
 
                         auto& entry = ::on_packet(recent, resolved_frequency);
@@ -218,7 +258,9 @@ void SearchView::do_detection() {
                         if (pmem::beep_on_packets()) {
                             baseband::request_audio_beep(1000, 24000, 60);
                         }
-                        // TODO: open Audio.
+
+                        if (settings_.auto_listen)
+                            start_listening(resolved_frequency);
                     } else
                         text_infos.set("Out of range");
                 }
@@ -233,10 +275,13 @@ void SearchView::do_detection() {
             if (release_timer >= RELEASE_DELAY) {
                 locked = false;
 
-                auto& entry = ::on_packet(recent, resolved_frequency);
-                entry.set_duration(duration);
-                if (logging) logger.log_data(entry);
-                recent_entries_view.set_dirty();
+                if (!locked_ignored) {
+                    auto& entry = ::on_packet(recent, resolved_frequency);
+                    entry.set_duration(duration);
+                    if (logging) logger.log_data(entry);
+                    recent_entries_view.set_dirty();
+                }
+                locked_ignored = false;
 
                 text_infos.set("Listening");
                 big_display.set_style(Theme::getInstance()->fg_medium);
@@ -294,12 +339,20 @@ void SearchView::do_timers() {
         if (release_timer < RELEASE_DELAY) release_timer++;
 
         if (locked) duration++;
+
+        if (listening) {
+            if (++listen_timer >= AUTO_LISTEN_TICKS)
+                finish_listening();
+        }
     }
 
     timing_div++;
 }
 
 void SearchView::on_channel_spectrum(const ChannelSpectrum& spectrum) {
+    // Sweep is paused while auto-listen has switched the baseband to NFM audio.
+    if (listening) return;
+
     uint8_t max_power = 0;
     int16_t max_bin = 0;
     uint8_t power;
@@ -335,15 +388,22 @@ void SearchView::on_channel_spectrum(const ChannelSpectrum& spectrum) {
     if (slices_nb > 1) {
         // Slice sequence
         if (slice_counter >= slices_nb) {
-            do_detection();
             slice_counter = 0;
+            do_detection();
         } else
             slice_counter++;
+
+        // do_detection() may have switched the baseband to NFM audio (auto-listen);
+        // the sweep is paused until stop_listening()/finish_listening() restores it.
+        if (listening) return;
+
         receiver_model.set_target_frequency(slices[slice_counter].center_frequency);
         baseband::set_spectrum(SEARCH_SLICE_WIDTH, 31);  // Clear
     } else {
         // Unique slice
         do_detection();
+
+        if (listening) return;
     }
 
     baseband::spectrum_streaming_start();
@@ -390,6 +450,101 @@ void SearchView::on_range_changed() {
     bin_skip_frac = 0xF000 / slices_nb;
 
     slice_counter = 0;
+}
+
+// Freeze the sweep and switch the baseband to NFM audio on the locked frequency.
+void SearchView::start_listening(rf::Frequency freq) {
+    baseband::spectrum_streaming_stop();
+    receiver_model.disable();
+    baseband::shutdown();
+
+    baseband::run_image(portapack::spi_flash::image_tag_nfm_audio);
+    receiver_model.set_sampling_rate(3'072'000);
+    receiver_model.set_baseband_bandwidth(1'750'000);
+    receiver_model.set_modulation(ReceiverModel::Mode::NarrowbandFMAudio);
+    receiver_model.set_nbfm_configuration(0);
+    receiver_model.set_target_frequency(freq);
+    receiver_model.enable();
+
+    audio::output::start();
+
+    listening = true;
+    listen_timer = 0;
+    text_infos.set("ON AIR (audio)");
+}
+
+// Switch the baseband back to the wideband spectrum sweep and resume scanning.
+void SearchView::stop_listening() {
+    if (!listening) return;
+
+    audio::output::stop();
+    receiver_model.disable();
+    baseband::shutdown();
+
+    baseband::run_image(portapack::spi_flash::image_tag_wideband_spectrum);
+    receiver_model.set_sampling_rate(SEARCH_SLICE_WIDTH);
+    receiver_model.set_baseband_bandwidth(SEARCH_SLICE_WIDTH / 2);
+    receiver_model.set_modulation(ReceiverModel::Mode::SpectrumAnalysis);
+    receiver_model.set_target_frequency(slices[slice_counter].center_frequency);
+    receiver_model.enable();
+
+    baseband::set_spectrum(SEARCH_SLICE_WIDTH, 31);
+    baseband::spectrum_streaming_start();
+
+    listening = false;
+}
+
+// Called when the auto-listen dwell time elapses: finalize the recent entry and resume sweeping.
+void SearchView::finish_listening() {
+    stop_listening();
+
+    if (!locked_ignored) {
+        auto& entry = ::on_packet(recent, resolved_frequency);
+        entry.set_duration(duration);
+        if (logging) logger.log_data(entry);
+        recent_entries_view.set_dirty();
+    }
+    locked_ignored = false;
+
+    locked = false;
+    detect_timer = 0;
+    release_timer = 0;
+    listen_timer = 0;
+    text_infos.set("Listening");
+    big_display.set_style(Theme::getInstance()->fg_medium);
+}
+
+bool SearchView::is_ignored(rf::Frequency freq) const {
+    return std::find(ignored_frequencies.begin(), ignored_frequencies.end(), freq) != ignored_frequencies.end();
+}
+
+void SearchView::load_ignore_list() {
+    ignored_frequencies.clear();
+
+    FreqmanDB db;
+    if (!db.open(get_freqman_path(ignore_freqman_file)))
+        return;
+
+    for (auto entry : db) {
+        if (entry.type == freqman_type::Single && entry.frequency_a > 0)
+            ignored_frequencies.push_back(entry.frequency_a);
+    }
+}
+
+void SearchView::add_to_ignore_list(rf::Frequency freq) {
+    if (is_ignored(freq))
+        return;
+
+    FreqmanDB db;
+    if (db.open(get_freqman_path(ignore_freqman_file), /*create*/ true)) {
+        freqman_entry entry{
+            .frequency_a = freq,
+            .type = freqman_type::Single,
+        };
+        db.append_entry(entry);
+    }
+
+    ignored_frequencies.push_back(freq);
 }
 
 void SearchView::add_spectrum_pixel(Color color) {
