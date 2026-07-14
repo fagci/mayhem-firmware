@@ -225,6 +225,22 @@ void SearchView::do_detection() {
                 if (!locked) {
                     resolved_frequency = slices[slice_max].center_frequency + (SEARCH_BIN_WIDTH * (bin_max - 128));
 
+                    // Sub-bin refinement: parabolic interpolation using the power of the
+                    // neighboring bins narrows the ~9.8kHz FFT bin resolution down to a
+                    // fraction of a bin for a clean, single peak.
+                    {
+                        int32_t bin_left = slices[slice_max].power_left;
+                        int32_t bin_center = slices[slice_max].max_power;
+                        int32_t bin_right = slices[slice_max].power_right;
+                        int32_t denom = bin_left - 2 * bin_center + bin_right;
+                        if (bin_left > 0 && bin_right > 0 && denom < 0) {
+                            float bin_offset = 0.5f * (bin_left - bin_right) / (float)denom;
+                            if (bin_offset > 0.5f) bin_offset = 0.5f;
+                            if (bin_offset < -0.5f) bin_offset = -0.5f;
+                            resolved_frequency += (int64_t)(bin_offset * SEARCH_BIN_WIDTH);
+                        }
+                    }
+
                     if (check_snap.value()) {
                         snap_value = options_snap.selected_index_value();
                         resolved_frequency = round(resolved_frequency / snap_value) * snap_value;
@@ -361,18 +377,17 @@ void SearchView::on_channel_spectrum(const ChannelSpectrum& spectrum) {
 
     baseband::spectrum_streaming_stop();
 
-    // Add pixels to spectrum display and find max power for this slice
     // Center 12 bins are ignored (DC spike is blanked)
     // Leftmost and rightmost 2 bins are ignored
+    auto bin_power = [&spectrum](int32_t b) -> uint8_t {
+        if ((b < 2) || (b > 253) || ((b >= 122) && (b < 134)))
+            return 0;
+        return (b < 128) ? spectrum.db[128 + b] : spectrum.db[b - 128];
+    };
+
+    // Add pixels to spectrum display and find max power for this slice
     for (bin = 0; bin < 256; bin++) {
-        if ((bin < 2) || (bin > 253) || ((bin >= 122) && (bin < 134))) {
-            power = 0;
-        } else {
-            if (bin < 128)
-                power = spectrum.db[128 + bin];
-            else
-                power = spectrum.db[bin - 128];
-        }
+        power = bin_power(bin);
 
         add_spectrum_pixel(gradient.lut[power]);
 
@@ -385,6 +400,9 @@ void SearchView::on_channel_spectrum(const ChannelSpectrum& spectrum) {
 
     slices[slice_counter].max_power = max_power;
     slices[slice_counter].max_index = max_bin;
+    // Neighboring bin power around the peak, for sub-bin interpolation in do_detection().
+    slices[slice_counter].power_left = bin_power(max_bin - 1);
+    slices[slice_counter].power_right = bin_power(max_bin + 1);
 
     if (slices_nb > 1) {
         // Slice sequence

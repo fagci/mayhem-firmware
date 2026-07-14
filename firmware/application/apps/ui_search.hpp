@@ -148,8 +148,8 @@ class SearchView : public View {
         rf::Frequency center_frequency;
         uint8_t max_power;
         int16_t max_index;
-        uint8_t power;
-        int16_t index;
+        uint8_t power_left;   // Power of the bin left of max_index, for sub-bin interpolation
+        uint8_t power_right;  // Power of the bin right of max_index, for sub-bin interpolation
     } slices[32];
 
     uint32_t bin_skip_acc = 0;
