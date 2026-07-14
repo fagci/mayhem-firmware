@@ -27,8 +27,14 @@ jobs:
       - name: Run the Docker image
         run: docker run -e VERSION_STRING=pr_${{ github.event.pull_request.number || github.run_number }} -i -v ${{ github.workspace }}:/havoc portapack-dev
 
-      - name: Upload firmware artifact
+      - name: Upload DFU firmware artifact
         uses: actions/upload-artifact@v4
         with:
-          name: portapack-mayhem-firmware
+          name: portapack-mayhem-firmware-dfu
           path: build/firmware/portapack-mayhem-firmware.bin
+
+      - name: Upload on-device Flash Utility artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: portapack-mayhem-firmware-sdcard
+          path: build/firmware/portapack-mayhem_OCI.ppfw.tar
