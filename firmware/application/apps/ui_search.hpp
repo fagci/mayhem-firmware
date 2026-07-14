@@ -39,8 +39,15 @@ namespace ui {
 #define DETECT_DELAY 5  // In 100ms units
 #define RELEASE_DELAY 6
 
-#define AUTO_LISTEN_SECONDS 4                         // How long to stay listening to a locked signal
-#define AUTO_LISTEN_TICKS (AUTO_LISTEN_SECONDS * 10)  // do_timers() ticks at ~10Hz
+// Auto-listen: hold on the locked frequency while RSSI stays above squelch,
+// release after a period of silence, with a hard cap so a stuck/strong
+// signal can't block the sweep forever.
+#define AUTO_LISTEN_SQUELCH_DB -30
+#define AUTO_LISTEN_WARMUP_TICKS 3                              // Let AGC/filters settle before evaluating squelch
+#define AUTO_LISTEN_HANG_SECONDS 2                              // Silence duration before releasing
+#define AUTO_LISTEN_HANG_TICKS (AUTO_LISTEN_HANG_SECONDS * 10)  // ChannelStatistics updates at ~10Hz
+#define AUTO_LISTEN_MAX_SECONDS 30                              // Safety cap on total listen time
+#define AUTO_LISTEN_MAX_TICKS (AUTO_LISTEN_MAX_SECONDS * 10)    // do_timers() ticks at ~10Hz
 
 struct SearchRecentEntry {
     using Key = rf::Frequency;
@@ -177,7 +184,8 @@ class SearchView : public View {
     // Auto-listen (temporarily switches baseband to NFM audio on lock).
     static constexpr const char* ignore_freqman_file = "SEARCH_IGNORE";
     bool listening = false;
-    uint32_t listen_timer = 0;
+    uint32_t listen_timer = 0;       // Total elapsed listen ticks (for the safety cap)
+    uint32_t listen_hang_timer = 0;  // Consecutive below-squelch ticks (for silence release)
     std::vector<rf::Frequency> ignored_frequencies{};
 
     void do_detection();
@@ -189,6 +197,7 @@ class SearchView : public View {
     void start_listening(rf::Frequency freq);
     void stop_listening();
     void finish_listening();
+    void on_listen_statistics(const ChannelStatistics& statistics);
     bool is_ignored(rf::Frequency freq) const;
     void load_ignore_list();
     void add_to_ignore_list(rf::Frequency freq);
@@ -297,6 +306,12 @@ class SearchView : public View {
                 }
             }
             this->do_timers();
+        }};
+
+    MessageHandlerRegistration message_handler_stats{
+        Message::ID::ChannelStatistics,
+        [this](const Message* const p) {
+            this->on_listen_statistics(static_cast<const ChannelStatisticsMessage*>(p)->statistics);
         }};
 };
 

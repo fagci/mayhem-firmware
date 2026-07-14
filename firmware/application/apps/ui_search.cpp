@@ -341,7 +341,8 @@ void SearchView::do_timers() {
         if (locked) duration++;
 
         if (listening) {
-            if (++listen_timer >= AUTO_LISTEN_TICKS)
+            // Safety cap only; silence-based release is handled by on_listen_statistics().
+            if (++listen_timer >= AUTO_LISTEN_MAX_TICKS)
                 finish_listening();
         }
     }
@@ -470,6 +471,7 @@ void SearchView::start_listening(rf::Frequency freq) {
 
     listening = true;
     listen_timer = 0;
+    listen_hang_timer = 0;
     text_infos.set("ON AIR (audio)");
 }
 
@@ -494,7 +496,7 @@ void SearchView::stop_listening() {
     listening = false;
 }
 
-// Called when the auto-listen dwell time elapses: finalize the recent entry and resume sweeping.
+// Called when auto-listen releases (silence timeout or safety cap): finalize the recent entry and resume sweeping.
 void SearchView::finish_listening() {
     stop_listening();
 
@@ -510,8 +512,21 @@ void SearchView::finish_listening() {
     detect_timer = 0;
     release_timer = 0;
     listen_timer = 0;
+    listen_hang_timer = 0;
     text_infos.set("Listening");
     big_display.set_style(Theme::getInstance()->fg_medium);
+}
+
+// Hold the auto-listen while RSSI stays above squelch; release after a period of silence.
+void SearchView::on_listen_statistics(const ChannelStatistics& statistics) {
+    if (!listening) return;
+    if (listen_timer < AUTO_LISTEN_WARMUP_TICKS) return;  // Let AGC/filters settle first
+
+    if (statistics.max_db > AUTO_LISTEN_SQUELCH_DB) {
+        listen_hang_timer = 0;
+    } else if (++listen_hang_timer >= AUTO_LISTEN_HANG_TICKS) {
+        finish_listening();
+    }
 }
 
 bool SearchView::is_ignored(rf::Frequency freq) const {
